@@ -192,9 +192,9 @@ def train(actor, critic, task, num_nodes, train_data, valid_data, reward_fn,
                 torch.nn.utils.clip_grad_norm_(critic.parameters(), max_grad_norm)
                 critic_optim.step()
 
-                critic_rewards.append(torch.mean(critic_est.detach()).item())
-                rewards.append(torch.mean(reward.detach()).item())
-                losses.append(torch.mean(actor_loss.detach()).item())
+            critic_rewards.append(torch.mean(critic_est.detach()).item())
+            rewards.append(torch.mean(reward.detach()).item())
+            losses.append(torch.mean(actor_loss.detach()).item())
 
             if (batch_idx + 1) % 10 == 0:
                 end = time.time()
