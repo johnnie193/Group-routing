@@ -186,7 +186,7 @@ def reward(static, tour_indices):
     # 沿着点的维度求和
     batch_distances_sum = 0 # torch.sum(point_distances, dim=1)
 
-    circles_sum = 0 * utils.find_num_circles(tour_indices)
+    circles_sum = 100 * utils.find_num_circles(tour_indices)
 
     # circles_sum = 0
 

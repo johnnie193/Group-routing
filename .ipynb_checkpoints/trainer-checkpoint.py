@@ -17,14 +17,12 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import DataLoader
-from utils import find_num_circles
 
 from model import DRL4TSP, Encoder
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 #device = torch.device('cpu')
 
-record = []
 
 class StateCritic(nn.Module):
     """Estimates the problem complexity.
@@ -198,9 +196,8 @@ def train(actor, critic, task, num_nodes, train_data, valid_data, reward_fn,
                 torch.nn.utils.clip_grad_norm_(critic.parameters(), max_grad_norm)
                 critic_optim.step()
 
-            record.append(int(find_num_circles(tour_indices)))
 
-            print(tour_indices.cpu().numpy(), record[-1], sum(record)/len(record))
+            # assert 1+1==3
 
             critic_rewards.append(torch.mean(critic_est.detach()).item())
             rewards.append(torch.mean(reward.detach()).item())
