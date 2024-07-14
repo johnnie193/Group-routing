@@ -1,0 +1,4 @@
+matplotlib==3.9.1
+numpy==2.0.0
+sympy==1.12.1
+torch==2.1.2+cu118
