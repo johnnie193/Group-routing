@@ -184,13 +184,11 @@ def reward(static, tour_indices):
     point_distances = torch.sqrt(torch.sum((ptr1_gathered - ptr2_gathered) ** 2, dim=2))
 
     # 沿着点的维度求和
-    batch_distances_sum = 0 # torch.sum(point_distances, dim=1)
+    batch_distances_sum = torch.sum(point_distances, dim=1)
 
-    circles_sum = 100 * utils.find_num_circles(tour_indices)
+    circles_sum = utils.find_num_circles(tour_indices)
 
-    # circles_sum = 0
-
-    sum_rewards = torch.add(batch_distances_sum, circles_sum)
+    sum_rewards = torch.add(0 * batch_distances_sum, 1 * circles_sum)
 
     # print(f"num_circles: {int(utils.find_num_circles(tour_indices))}")
     # print(f"sum_rewards: {sum_rewards}")

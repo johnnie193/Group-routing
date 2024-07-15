@@ -162,7 +162,7 @@ class DRL4TSP(nn.Module):
         # Used as a proxy initial state in the decoder when not specified 默认的decoder_input (batch_size, num_points, 2, 1)
         # self.x0 = torch.zeros((1, static_size, 1), requires_grad=True, device=device)
 
-    def forward(self, static, dynamic, mask_first = None, mask_second = None, decoder_input=None, last_hh=None):
+    def forward(self, static, dynamic, mask_first = None, mask_second = None, iter_num = None, decoder_input=None, last_hh = None):
         """
         Parameters
         ----------
@@ -210,14 +210,13 @@ class DRL4TSP(nn.Module):
         for _ in range(max_steps):
 
             if mask_first.byte().any() and mask_second.byte().any():
-                decoder_input, dynamic_hidden, last_hh, dynamic, tour_logp, tour_idx, mask_first, mask_second = self.step(decoder_input, static_hidden, dynamic_hidden, last_hh, static, dynamic, tour_logp, tour_idx, mask_first, mask_second)
+                decoder_input, dynamic_hidden, last_hh, dynamic, tour_logp, tour_idx, mask_first, mask_second,chosen_points = self.step(decoder_input, static_hidden, dynamic_hidden, last_hh, static, dynamic, tour_logp, tour_idx, mask_first, mask_second, iter_num)
 
 #        tour_idx = torch.cat(tour_idx, dim=1)  # (batch_size, seq_len)
         tour_logp = torch.cat(tour_logp, dim=1)  # (batch_size, seq_len)
+        return decoder_input, tour_logp, mask_first, mask_second, chosen_points
 
-        return decoder_input, tour_logp, mask_first, mask_second
-
-    def step(self, decoder_input, static_hidden, dynamic_hidden, last_hh, static, dynamic, tour_logp, tour_idx, mask_first, mask_second):
+    def step(self, decoder_input, static_hidden, dynamic_hidden, last_hh, static, dynamic, tour_logp, tour_idx, mask_first, mask_second, iter_num):
         # 扩展 indices(decoder_input:[256,21]) 以便在 dim=2 上进行 gather 操作
         batch_size, input_size, sequence_size = static.size()
 
@@ -245,22 +244,28 @@ class DRL4TSP(nn.Module):
 
         # last_hh.size() 1,B,hidden
         # mask.size() B, 20+1 if masked then 0 else 1
-        first_probs = F.softmax(probs + mask_first.log(), dim=1)
 
         # When training, sample the next step according to its probability.
         # During testing, we can take the greedy approach and choose highest
-        if self.training:
-            m = torch.distributions.Categorical(first_probs)
 
-            # Sometimes an issue with Categorical & sampling on GPU; See:
-            # https://github.com/pemami4911/neural-combinatorial-rl-pytorch/issues/5
-            first_ptr = m.sample()
-            while not torch.gather(mask_first, 1, first_ptr.data.unsqueeze(1)).byte().all():
-                first_ptr = m.sample() # 检查下sample的有无被mask掉
-            first_logp = m.log_prob(first_ptr)
-        else:
-            prob, first_ptr = torch.max(first_probs, 1)  # Greedy
-            first_logp = prob.log()
+        # first_probs = F.softmax(probs + mask_first.log(), dim=1)
+        # # learn first ptr
+        # if self.training:
+        #     m = torch.distributions.Categorical(first_probs)
+
+        #     # Sometimes an issue with Categorical & sampling on GPU; See:
+        #     # https://github.com/pemami4911/neural-combinatorial-rl-pytorch/issues/5
+        #     first_ptr = m.sample()
+        #     while not torch.gather(mask_first, 1, first_ptr.data.unsqueeze(1)).byte().all():
+        #         first_ptr = m.sample() # 检查下sample的有无被mask掉
+        #     first_logp = m.log_prob(first_ptr)
+        # else:
+        #     prob, first_ptr = torch.max(first_probs, 1)  # Greedy
+        #     first_logp = prob.log()
+        # print(iter_num)
+        first_ptr = torch.full((256,), iter_num).to(device)
+
+        
 
         # After visiting a node update the dynamic representation
         # dynamic B,2,20+1 2:load demand
@@ -298,18 +303,21 @@ class DRL4TSP(nn.Module):
             while not torch.gather(mask_second, 1, second_ptr.data.unsqueeze(1)).byte().all():
                 second_ptr = m.sample() # 检查下sample的有无被mask掉
             second_logp = m.log_prob(second_ptr)
+
         else:
             prob, second_ptr = torch.max(second_probs, 1)  # Greedy
             second_logp = prob.log()
-        mask_first[torch.arange(first_ptr.size(0)), first_ptr] = 0
+        # mask_first[torch.arange(first_ptr.size(0)), first_ptr] = 0
         mask_second[torch.arange(second_ptr.size(0)), second_ptr] = 0
+
         chosen_points = torch.stack((first_ptr, second_ptr), dim=1)
         # print(f"chosen_points: {chosen_points}")
         decoder_input = utils.apply_batch_permutation_pytorch(chosen_points,decoder_input)
         # print(f"permutation: {decoder_input}")
-        tour_logp.append((first_logp.unsqueeze(1)))
+        logp = (second_logp)
+        tour_logp.append(logp.unsqueeze(1))
         tour_idx.append((first_ptr.data.unsqueeze(1),second_ptr.data.unsqueeze(1)))
-        return decoder_input,dynamic_hidden,last_hh,dynamic,tour_logp,tour_idx,mask_first,mask_second
+        return decoder_input,dynamic_hidden,last_hh,dynamic,tour_logp,tour_idx,mask_first,mask_second,chosen_points
 
 
 if __name__ == '__main__':
