@@ -6,6 +6,7 @@ Each task must define the following functions:
 * reward_fn: specifies the quality of found solutions
 * render_fn: Specifies how to plot found solutions. Can be None
 """
+import utils
 
 import os
 import time
@@ -17,15 +18,12 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import DataLoader
-from utils import find_num_circles
-import matplotlib.pyplot as plt
 
 from model import DRL4TSP, Encoder
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 #device = torch.device('cpu')
 
-record = []
 
 class StateCritic(nn.Module):
     """Estimates the problem complexity.
@@ -38,7 +36,7 @@ class StateCritic(nn.Module):
         super(StateCritic, self).__init__()
 
         self.static_encoder = Encoder(static_size, hidden_size)
-        self.dynamic_encoder = Encoder(static_size, hidden_size)
+        self.dynamic_encoder = Encoder(dynamic_size, hidden_size)
 
         # Define the encoder & decoder models
         self.fc1 = nn.Conv1d(hidden_size * 2, 20, kernel_size=1)
@@ -83,6 +81,7 @@ class Critic(nn.Module):
                 nn.init.xavier_uniform_(p)
 
     def forward(self, input):
+
         output = F.relu(self.fc1(input.unsqueeze(1)))
         output = F.relu(self.fc2(output)).squeeze(2)
         output = self.fc3(output).sum(dim=2)
@@ -149,11 +148,11 @@ def train(actor, critic, task, num_nodes, train_data, valid_data, reward_fn,
         actor.train()
         critic.train()
 
-        times, losses, rewards, critic_rewards = [], [], [], []
+        times, losses, rewards, critic_rewards, critics = [], [], [], [], []
 
         epoch_start = time.time()
         start = epoch_start
-
+    
         for batch_idx, batch in enumerate(train_loader):
 
             static, dynamic, x0 = batch
@@ -162,71 +161,94 @@ def train(actor, critic, task, num_nodes, train_data, valid_data, reward_fn,
             dynamic = torch.zeros(static.size()).to(device)
             x0 = x0.to(device) if len(x0) > 0 else None
 
-            max_step = 21
-            # tour_indices = torch.arange(0, 21, device=device).unsqueeze(0).repeat(batch_size, 1)
-            tour_indices = torch.arange(20,-1,-1,device=device).unsqueeze(0).repeat(batch_size, 1)
+            max_step = 20
+            tour_indices = torch.arange(0, 21, device=device).unsqueeze(0).repeat(batch_size, 1)
             mask_first = None
             mask_second = None
-            for i in range(max_step):
-                # print(i)
-                # Full forward pass through the dataset
-                tour_indices, tour_logp, mask_first, mask_second, chosen_points = actor(static, dynamic, mask_first, mask_second, iter_num = i, decoder_input = tour_indices)
-
-                # vrp 返回的是一组tour_indice 这组会多次经过depot 每次mask会更新
-
-                if tour_indices is not None:
-                    tour_indices = tour_indices.to(device)
-                # print(f"tour_indices:{tour_indices.cpu().numpy()}")
-
-                # Sum the log probabilities for each city in the tour
-                reward = reward_fn(static, tour_indices)
-
-                # print(f"reward:{int(reward)}")
-
-                # Query the critic for an estimate of the reward
-                # print(tour_indices.size()) # 1 2 21
-                # indices_expanded = tour_indices.unsqueeze(1).expand(-1, 2, -1)  # [256, 2, 21]
-                # # 使用 gather 在 dim=2 上进行操作，结果形状为 [256, 2, 21]
-                # critic_input = torch.gather(static, 2, indices_expanded)
-                # print(chosen_points.size())
-                # print(static.size())
-                # print(tour_indices.size())
-                critic_est = critic(tour_indices.unsqueeze(1).expand(-1,2,-1).float(), dynamic).view(-1)
-
+            last_ptr = None
+            decoder_input = None
+            last_hh = None
+            tour_logp = []
+            if True:
+                for i in range(max_step):
+    
+                    # Full forward pass through the dataset
+                    
+                    # tour_indices, tour_logp = actor(static, dynamic, tour_indices)
+                    decoder_input, tour_logp, last_hh, mask_first, mask_second, last_ptr, tour_indices = actor(static, dynamic, decoder_input, last_hh, indices = tour_indices, mask_first = mask_first, mask_second = mask_second, last_ptr = last_ptr, tour_logp = tour_logp)
+                    # vrp 返回的是一组tour_indice 这组会多次经过depot 每次mask会更新
+    
+                    if tour_indices is not None:
+                        tour_indices = tour_indices.to(device)
+        
+                        # Sum the log probabilities for each city in the tour
+                    reward = reward_fn(static, tour_indices)
+    
+                    # Query the critic for an estimate of the reward
+                # critic_input = torch.concat((tour_indices.unsqueeze(1),static),dim=1)
+                # print(critic_input.size())
+                tour_logp = torch.cat(tour_logp, dim=1)
+                # print(tour_logp.size())
+                critic_est = critic(static, dynamic).view(-1)
                 advantage = (reward - critic_est)
                 actor_loss = torch.mean(advantage.detach() * tour_logp.sum(dim=1))
                 critic_loss = torch.mean(advantage ** 2)
-
+    
                 actor_optim.zero_grad()
-                actor_loss.backward()
+                actor_loss.backward(retain_graph=True)
                 torch.nn.utils.clip_grad_norm_(actor.parameters(), max_grad_norm)
                 actor_optim.step()
-
+    
                 critic_optim.zero_grad()
-                critic_loss.backward()
+                critic_loss.backward(retain_graph=True)
                 torch.nn.utils.clip_grad_norm_(critic.parameters(), max_grad_norm)
                 critic_optim.step()
+    
+                critic_rewards.append(torch.mean(critic_est.detach()).item())
+                rewards.append(torch.mean(reward.detach()).item())
+                losses.append(torch.mean(actor_loss.detach()).item())
+                critics.append(torch.mean(critic_loss.detach()).item())
+                
 
-            # record.append(int(find_num_circles(tour_indices)))
 
-            # print(tour_indices.cpu().numpy(), record[-1], sum(record)/len(record))
+            # # Full forward pass through the dataset
+            # tour_indices, tour_logp = actor(static, dynamic, x0)
 
-            critic_rewards.append(torch.mean(critic_est.detach()).item())
-            rewards.append(torch.mean(reward.detach()).item())
-            losses.append(torch.mean(actor_loss.detach()).item())
-            print("reward:{}".format(np.mean(rewards)))
-            print("critic_est:{}".format(np.mean(critic_rewards)))
-            print("tour_logp:{}".format(torch.mean(tour_logp)))
+            # # Sum the log probabilities for each city in the tour
+            # reward = reward_fn(static, tour_indices)
+
+            # # Query the critic for an estimate of the reward
+            # critic_est = critic(static, dynamic).view(-1)
+
+            # advantage = (reward - critic_est)
+            # actor_loss = torch.mean(advantage.detach() * tour_logp.sum(dim=1))
+            # critic_loss = torch.mean(advantage ** 2)
+
+            # actor_optim.zero_grad()
+            # actor_loss.backward()
+            # torch.nn.utils.clip_grad_norm_(actor.parameters(), max_grad_norm)
+            # actor_optim.step()
+
+            # critic_optim.zero_grad()
+            # critic_loss.backward()
+            # torch.nn.utils.clip_grad_norm_(critic.parameters(), max_grad_norm)
+            # critic_optim.step()
+
+            # critic_rewards.append(torch.mean(critic_est.detach()).item())
+            # rewards.append(torch.mean(reward.detach()).item())
+            # losses.append(torch.mean(actor_loss.detach()).item())
+
             if (batch_idx + 1) % 10 == 0:
                 end = time.time()
                 times.append(end - start)
                 start = end
 
                 mean_loss = np.mean(losses[-100:])
+                mean_c = np.mean(critics[-100:])
                 mean_reward = np.mean(rewards[-100:])
 
-                print('  Batch %d/%d, reward: %2.3f, loss: %2.4f, took: %2.4fs' %
-                      (batch_idx, len(train_loader), mean_reward, mean_loss,
+                print('  Batch %d/%d, reward: %2.3f, actorloss: %2.4f, criticloss: %2.4f, took: %2.4fs' %
+                      (batch_idx, len(train_loader), mean_reward, mean_loss, mean_c,
                        times[-1]))
 
         mean_loss = np.mean(losses)
@@ -268,23 +290,23 @@ def train(actor, critic, task, num_nodes, train_data, valid_data, reward_fn,
 
 
 # def train_tsp(args):
-#
+
 #     # Goals from paper:
 #     # TSP20, 3.97
 #     # TSP50, 6.08
 #     # TSP100, 8.44
-#
+
 #     from tasks import tsp
 #     from tasks.tsp import TSPDataset
-#
+
 #     STATIC_SIZE = 2 # (x, y)
 #     DYNAMIC_SIZE = 1 # dummy for compatibility
-#
+
 #     train_data = TSPDataset(args.num_nodes, args.train_size, args.seed)
 #     valid_data = TSPDataset(args.num_nodes, args.valid_size, args.seed + 1)
-#
+
 #     update_fn = None
-#
+
 #     actor = DRL4TSP(STATIC_SIZE,
 #                     DYNAMIC_SIZE,
 #                     args.hidden_size,
@@ -292,33 +314,33 @@ def train(actor, critic, task, num_nodes, train_data, valid_data, reward_fn,
 #                     tsp.update_mask,
 #                     args.num_layers,
 #                     args.dropout).to(device)
-#
+
 #     critic = StateCritic(STATIC_SIZE, DYNAMIC_SIZE, args.hidden_size).to(device)
-#
+
 #     kwargs = vars(args)
 #     kwargs['train_data'] = train_data
 #     kwargs['valid_data'] = valid_data
 #     kwargs['reward_fn'] = tsp.reward
 #     kwargs['render_fn'] = tsp.render
-#
+
 #     if args.checkpoint:
 #         path = os.path.join(args.checkpoint, 'actor.pt')
 #         actor.load_state_dict(torch.load(path, device))
-#
+
 #         path = os.path.join(args.checkpoint, 'critic.pt')
 #         critic.load_state_dict(torch.load(path, device))
-#
+
 #     if not args.test:
 #         train(actor, critic, **kwargs)
-#
+
 #     test_data = TSPDataset(args.num_nodes, args.train_size, args.seed + 2)
-#
+
 #     test_dir = 'test'
 #     test_loader = DataLoader(test_data, args.batch_size, False, num_workers=0)
 #     out = validate(test_loader, actor, tsp.reward, tsp.render, test_dir, num_plot=5)
-#
+
 #     print('Average tour length: ', out)
-#
+
 
 def train_vrp(args):
 
@@ -328,6 +350,7 @@ def train_vrp(args):
     # VRP50, Capacity 40:  11.39 (Greedy)
     # VRP100, Capacity 50: 17.23  (Greedy)
 
+    # from tasks import vrp
     import vrp
     from vrp import VehicleRoutingDataset
 
@@ -359,7 +382,6 @@ def train_vrp(args):
                     args.num_layers,
                     args.dropout).to(device)
 
-    # 就是类似点坐标的embedding作baseline？
     critic = StateCritic(STATIC_SIZE, DYNAMIC_SIZE, args.hidden_size).to(device)
 
     kwargs = vars(args)
@@ -399,11 +421,10 @@ if __name__ == '__main__':
     parser.add_argument('--test', action='store_true', default=False)
     parser.add_argument('--task', default='vrp')
     parser.add_argument('--nodes', dest='num_nodes', default=20, type=int)
-    parser.add_argument('--actor_lr', default=5, type=float)
-    parser.add_argument('--critic_lr', default=5, type=float)
+    parser.add_argument('--actor_lr', default=5e-3, type=float)
+    parser.add_argument('--critic_lr', default=5e-3, type=float)
     parser.add_argument('--max_grad_norm', default=2., type=float)
     parser.add_argument('--batch_size', default=256, type=int)
-    # parser.add_argument('--batch_size', default=1, type=int)
     parser.add_argument('--hidden', dest='hidden_size', default=128, type=int)
     parser.add_argument('--dropout', default=0.1, type=float)
     parser.add_argument('--layers', dest='num_layers', default=1, type=int)
@@ -416,9 +437,9 @@ if __name__ == '__main__':
     #args.checkpoint = os.path.join('vrp', '10', '12_59_47.350165' + os.path.sep)
     #print(args.checkpoint)
 
-    # if args.task == 'tsp':
-    #     train_tsp(args)
-    if args.task == 'vrp':
+    if args.task == 'tsp':
+        train_tsp(args)
+    elif args.task == 'vrp':
         train_vrp(args)
     else:
         raise ValueError('Task <%s> not understood'%args.task)

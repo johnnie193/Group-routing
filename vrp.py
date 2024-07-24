@@ -12,11 +12,9 @@ import torch
 from torch.utils.data import Dataset
 from torch.autograd import Variable
 import matplotlib
-
-import utils
-
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+import utils
 
 
 class VehicleRoutingDataset(Dataset):
@@ -62,7 +60,7 @@ class VehicleRoutingDataset(Dataset):
         # (static, dynamic, start_loc)
         return (self.static[idx], self.dynamic[idx], self.static[idx, :, 0:1])
 
-    def update_mask(self, mask, dynamic, chosen_idx=None, released_idx=None):
+    def update_mask(self, mask, dynamic, chosen_idx=None):
         """Updates the mask used to hide non-valid states.
 
         Parameters
@@ -70,49 +68,43 @@ class VehicleRoutingDataset(Dataset):
         dynamic: torch.autograd.Variable of size (1, num_feats, seq_len)
         """
 
-        # # Convert floating point to integers for calculations
-        # loads = dynamic.data[:, 0]  # (batch_size, seq_len)
-        # demands = dynamic.data[:, 1]  # (batch_size, seq_len)
-        #
-        # # If there is no positive demand left, we can end the tour.
-        # # Note that the first node is the depot, which always has a negative demand
-        # if demands.eq(0).all():
-        #     return demands * 0.
-        #
-        # # Otherwise, we can choose to go anywhere where demand is > 0
-        # new_mask = demands.ne(0) * demands.lt(loads)
-        #
-        # # We should avoid traveling to the depot back-to-back
-        # repeat_home = chosen_idx.ne(0)
-        #
-        # if repeat_home.any():
-        #     new_mask[repeat_home.nonzero(), 0] = 1.
-        # if (~repeat_home).any():
-        #     new_mask[(~repeat_home).nonzero(), 0] = 0.
-        #
-        # # ... unless we're waiting for all other samples in a minibatch to finish
-        # has_no_load = loads[:, 0].eq(0).float()
-        # has_no_demand = demands[:, 1:].sum(1).eq(0).float()
-        #
-        # combined = (has_no_load + has_no_demand).gt(0)
-        # if combined.any():
-        #     new_mask[combined.nonzero(), 0] = 1.
-        #     new_mask[combined.nonzero(), 1:] = 0.
-        # return new_mask.float()
-        # if chosen_idx.any():
-        #     mask[chosen_idx] = 1
-        # if released_idx.any():
-        #     mask[released_idx] = 0
+        # Convert floating point to integers for calculations
+        loads = dynamic.data[:, 0]  # (batch_size, seq_len)
+        demands = dynamic.data[:, 1]  # (batch_size, seq_len)
 
-        return mask
+        # If there is no positive demand left, we can end the tour.
+        # Note that the first node is the depot, which always has a negative demand
+        if demands.eq(0).all():
+            return demands * 0.
+
+        # Otherwise, we can choose to go anywhere where demand is > 0
+        new_mask = demands.ne(0) * demands.lt(loads)
+
+        # We should avoid traveling to the depot back-to-back
+        repeat_home = chosen_idx.ne(0)
+
+        if repeat_home.any():
+            new_mask[repeat_home.nonzero(), 0] = 1.
+        if (~repeat_home).any():
+            new_mask[(~repeat_home).nonzero(), 0] = 0.
+
+        # ... unless we're waiting for all other samples in a minibatch to finish
+        has_no_load = loads[:, 0].eq(0).float()
+        has_no_demand = demands[:, 1:].sum(1).eq(0).float()
+
+        combined = (has_no_load + has_no_demand).gt(0)
+        if combined.any():
+            new_mask[combined.nonzero(), 0] = 1.
+            new_mask[combined.nonzero(), 1:] = 0.
+
+        return new_mask.float()
 
     def update_dynamic(self, dynamic, chosen_idx):
         """Updates the (load, demand) dataset values."""
-        # print(chosen_idx) [B]
-        # print(chosen_idx.size())
+
         # Update the dynamic elements differently for if we visit depot vs. a city
         visit = chosen_idx.ne(0)
-        depot = chosen_idx.eq(0) # 现在只有0是一个depot
+        depot = chosen_idx.eq(0)
 
         # Clone the dynamic variable so we don't mess up graph
         all_loads = dynamic[:, 0].clone()
@@ -149,21 +141,22 @@ def reward(static, tour_indices):
     Euclidean distance between all cities / nodes given by tour_indices
     """
 
+    # print(tour_indices.size())
+
     # # Convert the indices back into a tour
     # idx = tour_indices.unsqueeze(1).expand(-1, static.size(1), -1)
     # tour = torch.gather(static.data, 2, idx).permute(0, 2, 1)
-    #
+
     # # Ensure we're always returning to the depot - note the extra concat
     # # won't add any extra loss, as the euclidean distance between consecutive
     # # points is 0
     # start = static.data[:, :, 0].unsqueeze(1)
     # y = torch.cat((start, tour, start), dim=1)
-    #
+
     # # Euclidean distance between each consecutive point
     # tour_len = torch.sqrt(torch.sum(torch.pow(y[:, :-1] - y[:, 1:], 2), dim=2))
 
     # return tour_len.sum(1)
-
     # static 256 2 21 tour_indices 256 21
     # 先提取点
     # 扩展 indices(decoder_input:[256,21]) 以便在 dim=2 上进行 gather 操作
@@ -179,21 +172,23 @@ def reward(static, tour_indices):
 
     # 使用 gather 在 dim=2 上进行操作，结果形状为 [256, 2, 21]
     ptr2_gathered = torch.gather(static, 2, indices_expanded)
-
     # 计算两个张量之间的距离
-    point_distances = torch.sqrt(torch.sum((ptr1_gathered - ptr2_gathered) ** 2, dim=2))
-
+    # point_distances = torch.sqrt(torch.sum((ptr1_gathered - ptr2_gathered) ** 2, dim=2))
+    absolute_differences = torch.abs(ptr1_gathered - ptr2_gathered)
+    # 对每个 dim0 的所有绝对差求和
+    batch_distances_sum = torch.sum(absolute_differences, dim=(1, 2))
     # 沿着点的维度求和
-    batch_distances_sum = torch.sum(point_distances, dim=1)
+    # batch_distances_sum = torch.sum(point_distances, dim=1)
 
-    circles_sum = utils.find_num_circles(tour_indices)
+    circles_sum = 2 * utils.find_num_circles(tour_indices)
+    # print(tour_indices)
+    # print(circles_sum)
 
-    sum_rewards = torch.add(0 * batch_distances_sum, 1 * circles_sum)
+    # sum_rewards = torch.add(batch_distances_sum, circles_sum)
 
-    # print(f"num_circles: {int(utils.find_num_circles(tour_indices))}")
-    # print(f"sum_rewards: {sum_rewards}")
+    # print(utils.find_num_circles(tour_indices))
 
-    return sum_rewards
+    return batch_distances_sum
 
 
 def render(static, tour_indices, save_path):

@@ -2,7 +2,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import utils
-
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 #device = torch.device('cpu')
 
@@ -33,14 +32,10 @@ class Attention(nn.Module):
                                           device=device, requires_grad=True))
 
     def forward(self, static_hidden, dynamic_hidden, decoder_hidden):
-        # print(decoder_hidden.size())
-        # print(static_hidden.size())
 
-        # decoder_hidden b,hidden_size,seq_len
         batch_size, hidden_size, _ = static_hidden.size()
 
-        # hidden = decoder_hidden.unsqueeze(2).expand_as(static_hidden)]
-        hidden = decoder_hidden.transpose(1,2)
+        hidden = decoder_hidden.unsqueeze(2).expand_as(static_hidden)
         hidden = torch.cat((static_hidden, dynamic_hidden, hidden), 1)
 
         # Broadcast some dimensions so we can do batch-matrix-multiply
@@ -77,11 +72,11 @@ class Pointer(nn.Module):
         self.drop_rnn = nn.Dropout(p=dropout)
         self.drop_hh = nn.Dropout(p=dropout)
 
-    #decoder_hidden 从 B,2,hidden_size 变成了 B,n,2,hidden_size
     def forward(self, static_hidden, dynamic_hidden, decoder_hidden, last_hh):
-        # rnn_out, last_hh = self.gru(decoder_hidden.transpose(2, 1), last_hh)
-        decoder_hidden = decoder_hidden.reshape((decoder_hidden.size(0), -1, self.hidden_size))
-        rnn_out, last_hh = self.gru(decoder_hidden, last_hh)
+        # if last_hh is not None:
+        #     last_hh = last_hh.detach()
+        rnn_out, last_hh = self.gru(decoder_hidden.transpose(2, 1), last_hh)
+        
         rnn_out = rnn_out.squeeze(1)
 
         # Always apply dropout on the RNN output
@@ -90,7 +85,7 @@ class Pointer(nn.Module):
             # If > 1 layer dropout is already applied
             last_hh = self.drop_hh(last_hh) 
 
-        # Given a summary of the output, find an input context 根据rnn结果分配注意力
+        # Given a summary of the output, find an  input context
         enc_attn = self.encoder_attn(static_hidden, dynamic_hidden, rnn_out)
         context = enc_attn.bmm(static_hidden.permute(0, 2, 1))  # (B, 1, num_feats)
 
@@ -102,7 +97,6 @@ class Pointer(nn.Module):
         W = self.W.expand(static_hidden.size(0), -1, -1)
 
         probs = torch.bmm(v, torch.tanh(torch.bmm(W, energy))).squeeze(1)
-        # (B, 20+1)
 
         return probs, last_hh
 
@@ -150,6 +144,10 @@ class DRL4TSP(nn.Module):
         self.mask_fn = mask_fn
 
         # Define the encoder & decoder models
+        # EDIT: self.static_encoder = Encoder(static_size, hidden_size)
+        # self.static_encoder = Encoder(static_size + 1, hidden_size)
+        # self.dynamic_encoder = Encoder(dynamic_size, hidden_size)
+        # self.decoder = Encoder(static_size + 1, hidden_size)
         self.static_encoder = Encoder(static_size, hidden_size)
         self.dynamic_encoder = Encoder(dynamic_size, hidden_size)
         self.decoder = Encoder(static_size, hidden_size)
@@ -159,10 +157,11 @@ class DRL4TSP(nn.Module):
             if len(p.shape) > 1:
                 nn.init.xavier_uniform_(p)
 
-        # Used as a proxy initial state in the decoder when not specified 默认的decoder_input (batch_size, num_points, 2, 1)
-        # self.x0 = torch.zeros((1, static_size, 1), requires_grad=True, device=device)
+        # EDIT: Used as a proxy initial state in the decoder when not specified
+        # self.x0 = torch.zeros((1, static_size + 1, 1), requires_grad=True, device=device)
+        self.x0 = torch.zeros((1, static_size, 1), requires_grad=True, device=device)
 
-    def forward(self, static, dynamic, mask_first = None, mask_second = None, iter_num = None, decoder_input=None, last_hh = None):
+    def forward(self, static, dynamic, decoder_input=None, last_hh=None, indices = None, mask_first = None, mask_second = None, last_ptr = None, tour_logp = None):
         """
         Parameters
         ----------
@@ -180,145 +179,117 @@ class DRL4TSP(nn.Module):
         last_hh: Array of size (batch_size, num_hidden)
             Defines the last hidden state for the RNN
         """
-
         batch_size, input_size, sequence_size = static.size()
-
-        if decoder_input is None:
-            self.x0 = torch.arange(0, sequence_size,device=device)
-            decoder_input = self.x0.unsqueeze(0).repeat(batch_size, 1)
-            # self.x0 = torch.zeros((1, sequence_size, 2, 1), requires_grad=True, device=device)
-            # decoder_input = self.x0.expand(batch_size, -1, -1, -1)
-
-        # 现在默认的decoder_input (batch_size, num_points, 2, 1)
-        # decoder_input = static.unsqueeze(3)
-
-        # Always use a mask - if no function is provided, we don't update it
         if mask_first is None:
             mask_first = torch.ones(batch_size, sequence_size, device=device)
         if mask_second is None:
             mask_second = torch.ones(batch_size, sequence_size, device=device)
-        # Structures for holding the output sequences
-        tour_idx, tour_logp = [], []
-        max_steps = 1 #sequence_size if self.mask_fn is None else 1000
+        if decoder_input is None:
+            decoder_input = self.x0.expand(batch_size, -1, -1)
+        # Always use a mask - if no function is provided, we don't update it
+        # mask = torch.ones(batch_size, sequence_size, device=device)
 
+        # Structures for holding the output sequences
+        # tour_idx, tour_logp = [], []
+        # max_steps = sequence_size if self.mask_fn is None else 1000
+        max_steps = 1
+        
         # Static elements only need to be processed once, and can be used across
         # all 'pointing' iterations. When / if the dynamic elements change,
         # their representations will need to get calculated again.
-        static_hidden = self.static_encoder(static)
-        dynamic_hidden = self.dynamic_encoder(dynamic)
+        # EDIT: static_hidden = self.static_encoder(static)
+        if True:
+            if indices == None:
+                indices = torch.arange(0, sequence_size, device=device).unsqueeze(0).repeat(batch_size, 1)
+            # print(indices)
+            # Should be edited
+            # update_static_input = torch.concat((indices.unsqueeze(1),static),dim=1)
+            # static_hidden = self.static_encoder(update_static_input)
+            update_static_input = static
+            static_hidden = self.static_encoder(update_static_input)
+            dynamic_hidden = self.dynamic_encoder(dynamic)
+            
+            for _ in range(max_steps):
+    
+                # if not mask_first.byte().any():
+                #     break
+    
+                # ... but compute a hidden rep for each element added to sequence
+                decoder_hidden = self.decoder(decoder_input)
+    
+                probs, last_hh = self.pointer(static_hidden,
+                                              dynamic_hidden,
+                                              decoder_hidden, last_hh)
+                # probs = F.softmax(probs + mask.log(), dim=1)
+    
+                # # When training, sample the next step according to its probability.
+                # # During testing, we can take the greedy approach and choose highest
+                # if self.training:
+                #     m = torch.distributions.Categorical(probs)
+    
+                #     # Sometimes an issue with Categorical & sampling on GPU; See:
+                #     # https://github.com/pemami4911/neural-combinatorial-rl-pytorch/issues/5
+                #     ptr = m.sample()
+                #     while not torch.gather(mask, 1, ptr.data.unsqueeze(1)).byte().all():
+                #         ptr = m.sample()
+                #     logp = m.log_prob(ptr)
+                # else:
+                #     prob, ptr = torch.max(probs, 1)  # Greedy
+                #     logp = prob.log()
 
-        for _ in range(max_steps):
+                # Originr
+                # if last_ptr is None:
+                #     first_ptr = torch.zeros([256]).to(device)
+                #     mask_second[torch.arange(first_ptr.size(0)), 0] = 0
+                #     # print(mask_second)
+                # else:
+                #     first_ptr = last_ptr.clone().detach()
+                second_probs = F.softmax(probs + mask_second.log(), dim=1)
+                if self.training:
+                    m = torch.distributions.Categorical(second_probs)
+                    second_ptr = m.sample()
+                    # print(f"second_ptr:{second_ptr}")
+                    # print(mask_second.sum(dim=1)[0])
+                    while not torch.gather(mask_second, 1, second_ptr.data.unsqueeze(1)).byte().all():
+                        second_ptr = m.sample() # 检查下sample的有无被mask掉
+                else:
+                    prob, second_ptr = torch.max(second_probs, 1)  # Greedy
+                mask_second[torch.arange(second_ptr.size(0)), second_ptr] = 0
+                second_logp = F.log_softmax(probs,dim=1)[torch.arange(second_ptr.size(0)), second_ptr]
+                chosen_points = torch.stack((first_ptr, second_ptr), dim=1)
+                # print(chosen_points)
+                indices = utils.apply_batch_permutation_pytorch(chosen_points, indices)
+            # After visiting a node update the dynamic representation
+            # if self.update_fn is not None:
+            #     dynamic = self.update_fn(dynamic, ptr.data)
+            #     dynamic_hidden = self.dynamic_encoder(dynamic)
 
-            if mask_first.byte().any() and mask_second.byte().any():
-                decoder_input, dynamic_hidden, last_hh, dynamic, tour_logp, tour_idx, mask_first, mask_second,chosen_points = self.step(decoder_input, static_hidden, dynamic_hidden, last_hh, static, dynamic, tour_logp, tour_idx, mask_first, mask_second, iter_num)
+                # Since we compute the VRP in minibatches, some tours may have
+                # number of stops. We force the vehicles to remain at the depot 
+                # in these cases, and logp := 0
+                # is_done = dynamic[:, 1].sum(1).eq(0).float()
+                # logp = logp * (1. - is_done)
 
-#        tour_idx = torch.cat(tour_idx, dim=1)  # (batch_size, seq_len)
-        tour_logp = torch.cat(tour_logp, dim=1)  # (batch_size, seq_len)
-        return decoder_input, tour_logp, mask_first, mask_second, chosen_points
+            # # And update the mask so we don't re-visit if we don't need to
+            # if self.mask_fn is not None:
+            #     mask = self.mask_fn(mask, dynamic, ptr.data).detach()
 
-    def step(self, decoder_input, static_hidden, dynamic_hidden, last_hh, static, dynamic, tour_logp, tour_idx, mask_first, mask_second, iter_num):
-        # 扩展 indices(decoder_input:[256,21]) 以便在 dim=2 上进行 gather 操作
-        batch_size, input_size, sequence_size = static.size()
+            # tour_logp.append(logp.unsqueeze(1))
+            # tour_idx.append(ptr.data.unsqueeze(1))
+            logp = second_logp
+            tour_logp.append(logp.unsqueeze(1))
+            # tour_idx.append((first_ptr.data.unsqueeze(1),second_ptr.data.unsqueeze(1)))
+            decoder_input = torch.gather(update_static_input, 2,
+                                         second_ptr.view(-1, 1, 1)
+                                         .expand(-1, input_size, 1)).detach()
+            # EDIT:
+            # decoder_input = torch.gather(update_static_input, 2,
+            #                 second_ptr.view(-1, 1, 1)
+            #                 .expand(-1, 3, 1)).detach()
 
-        indices_expanded = decoder_input.unsqueeze(1).expand(-1, 2, -1)  # [256, 2, 21]
-
-        # print(decoder_input)
-
-        # 使用 gather 在 dim=2 上进行操作，结果形状为 [256, 2, 21]
-        gathered = torch.gather(static, 2, indices_expanded)
-
-        # # 调整形状为 [256, 21, 2]
-        # decoder_input_value = gathered.permute(0, 2, 1)
-
-        # ... but compute a hidden rep for each element added to sequence
-        # decoder_input.size() B,2,1 这个记录了当前车的位置 经过encoder B,2,hidden_size
-        # 现在的decoder_input B,n,2,1 记录每个点置换到哪里去的排序 经过encoder B,n,2,hidden_size
-        # decoder_hidden = self.decoder(decoder_input_value.unsqueeze(3))
-        # decoder_hidden = self.decoder(decoder_input_value.unsqueeze(3))
-        decoder_input_value = gathered.permute(0, 2, 1).reshape((-1,2)).unsqueeze(2)
-        decoder_hidden = self.decoder(decoder_input_value).view(batch_size,sequence_size, input_size,-1)
-
-        probs, last_hh = self.pointer(static_hidden,
-                                      dynamic_hidden,
-                                      decoder_hidden, last_hh)
-
-        # last_hh.size() 1,B,hidden
-        # mask.size() B, 20+1 if masked then 0 else 1
-
-        # When training, sample the next step according to its probability.
-        # During testing, we can take the greedy approach and choose highest
-
-        # first_probs = F.softmax(probs + mask_first.log(), dim=1)
-        # # learn first ptr
-        # if self.training:
-        #     m = torch.distributions.Categorical(first_probs)
-
-        #     # Sometimes an issue with Categorical & sampling on GPU; See:
-        #     # https://github.com/pemami4911/neural-combinatorial-rl-pytorch/issues/5
-        #     first_ptr = m.sample()
-        #     while not torch.gather(mask_first, 1, first_ptr.data.unsqueeze(1)).byte().all():
-        #         first_ptr = m.sample() # 检查下sample的有无被mask掉
-        #     first_logp = m.log_prob(first_ptr)
-        # else:
-        #     prob, first_ptr = torch.max(first_probs, 1)  # Greedy
-        #     first_logp = prob.log()
-        # print(iter_num)
-        first_ptr = torch.full((256,), iter_num).to(device)
-
-        
-
-        # After visiting a node update the dynamic representation
-        # dynamic B,2,20+1 2:load demand
-        # dynamic_hidden B,hidden_size,20+1
-
-        # if self.update_fn is not None:
-        #     dynamic = self.update_fn(dynamic, ptr.data)
-        #     dynamic_hidden = self.dynamic_encoder(dynamic)
-        #
-        #     # Since we compute the VRP in minibatches, some tours may have
-        #     # number of stops. We force the vehicles to remain at the depot
-        #     # in these cases, and logp := 0
-        #     is_done = dynamic[:, 1].sum(1).eq(0).float()
-        #     logp = logp * (1. - is_done)
-
-        # # And update the mask so we don't re-visit if we don't need to
-        # if self.mask_fn is not None:
-        #     mask = self.mask_fn(mask, dynamic, ptr.data).detach()
-        # ptr 256
-        # chosen_point = torch.gather(static, 2,
-        #                              ptr.view(-1, 1, 1)
-        #                              .expand(-1, input_size, 1)).detach()
-        # 256,21,1
-        # mask_second_cpy = mask_second.clone()
-        # mask_second_cpy[torch.arange(first_ptr.size(0)), first_ptr] = 0
-        # print(mask_second_cpy)
-        second_probs = F.softmax(probs + mask_second.log(), dim=1)
-
-        if self.training:
-            m = torch.distributions.Categorical(second_probs)
-
-            # Sometimes an issue with Categorical & sampling on GPU; See:
-            # https://github.com/pemami4911/neural-combinatorial-rl-pytorch/issues/5
-            second_ptr = m.sample()
-            while not torch.gather(mask_second, 1, second_ptr.data.unsqueeze(1)).byte().all():
-                second_ptr = m.sample() # 检查下sample的有无被mask掉
-            second_logp = m.log_prob(second_ptr)
-
-        else:
-            prob, second_ptr = torch.max(second_probs, 1)  # Greedy
-            second_logp = prob.log()
-        # mask_first[torch.arange(first_ptr.size(0)), first_ptr] = 0
-        mask_second[torch.arange(second_ptr.size(0)), second_ptr] = 0
-
-        chosen_points = torch.stack((first_ptr, second_ptr), dim=1)
-        # print(f"chosen_points: {chosen_points}")
-        decoder_input = utils.apply_batch_permutation_pytorch(chosen_points,decoder_input)
-        # print(f"permutation: {decoder_input}")
-        logp = (second_logp)
-        tour_logp.append(logp.unsqueeze(1))
-        tour_idx.append((first_ptr.data.unsqueeze(1),second_ptr.data.unsqueeze(1)))
-        return decoder_input,dynamic_hidden,last_hh,dynamic,tour_logp,tour_idx,mask_first,mask_second,chosen_points
-
+        # tour_idx = torch.cat(tour_idx, dim=1)  # (batch_size, seq_len)
+        # tour_logp = torch.cat(tour_logp, dim=1)  # (batch_size, seq_len)
+        return decoder_input, tour_logp, last_hh, mask_first, mask_second, second_ptr, indices
 
 if __name__ == '__main__':
     raise Exception('Cannot be called from main')
