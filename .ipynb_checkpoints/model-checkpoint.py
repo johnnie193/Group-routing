@@ -78,7 +78,8 @@ class Pointer(nn.Module):
         # rnn_out, last_hh = self.gru(decoder_hidden.transpose(2, 1).clone(), last_hh)
         rnn_out, last_hh = self.gru(decoder_hidden.transpose(2, 1), last_hh)
         
-        rnn_out = rnn_out.squeeze(1)
+        rnn_out = rnn_out.detach().squeeze(1)
+        last_hh = last_hh.detach()
 
         # Always apply dropout on the RNN output
         rnn_out = self.drop_rnn(rnn_out)
@@ -292,8 +293,7 @@ class DRL4TSP(nn.Module):
             print(tour_logp.size())
             print(logp.size())
             # tour_logp = torch.cat((tour_logp,logp.unsqueeze(1)), dim = 1)
-            # tour_logp = torch.cat((tour_logp, logp.unsqueeze(1)), dim=1).clone()
-            tour_logp = torch.cat((tour_logp, logp.unsqueeze(1)), dim=1)
+            tour_logp = torch.cat((tour_logp, logp.unsqueeze(1)), dim=1).clone()
             # tour_idx.append((first_ptr.data.unsqueeze(1),second_ptr.data.unsqueeze(1)))
             decoder_input = torch.gather(update_static_input, 2,
                                          second_ptr.view(-1, 1, 1)
@@ -305,9 +305,7 @@ class DRL4TSP(nn.Module):
 
         # tour_idx = torch.cat(tour_idx, dim=1)  # (batch_size, seq_len)
         # tour_logp = torch.cat(tour_logp, dim=1)  # (batch_size, seq_len)
-        # return decoder_input, tour_logp, last_hh, mask_first, mask_second, second_ptr, indices
-        return decoder_input, logp.unsqueeze(1), last_hh, mask_first, mask_second, second_ptr, indices
-
+        return decoder_input, tour_logp, last_hh, mask_first, mask_second, second_ptr, indices
 
 if __name__ == '__main__':
     raise Exception('Cannot be called from main')

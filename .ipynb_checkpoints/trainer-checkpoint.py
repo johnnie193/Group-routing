@@ -190,20 +190,17 @@ def train(actor, critic, task, num_nodes, train_data, valid_data, reward_fn,
                     # print(critic_input.size())
                     # tour_logp = torch.cat(tour_logp, dim=1)
                     # print(tour_logp.size())
-
-                    actor_optim.zero_grad()
-                    critic_optim.zero_grad()
-
                     critic_est = critic(static, dynamic).view(-1)
-                    advantage = (reward.detach() - critic_est)
+                    advantage = (reward - critic_est)
                     actor_loss = torch.mean(advantage.detach() * tour_logp.sum(dim=1))
-                    critic_loss = torch.mean(torch.pow(advantage, 2))
-
-
+                    critic_loss = torch.mean(advantage ** 2)
+        
+                    actor_optim.zero_grad()
                     actor_loss.backward(retain_graph=True)
                     torch.nn.utils.clip_grad_norm_(actor.parameters(), max_grad_norm)
                     actor_optim.step()
-
+        
+                    critic_optim.zero_grad()
                     critic_loss.backward(retain_graph=True)
                     torch.nn.utils.clip_grad_norm_(critic.parameters(), max_grad_norm)
                     critic_optim.step()
