@@ -186,6 +186,9 @@ class DRL4TSP(nn.Module):
             mask_second = torch.ones(batch_size, sequence_size, device=device)
         if decoder_input is None:
             decoder_input = self.x0.expand(batch_size, -1, -1)
+        first_ptr = last_ptr
+        if last_ptr is None:
+            first_ptr = torch.zeros(batch_size).to(device=device)
         # Always use a mask - if no function is provided, we don't update it
         # mask = torch.ones(batch_size, sequence_size, device=device)
 
@@ -236,18 +239,8 @@ class DRL4TSP(nn.Module):
                 # else:
                 #     prob, ptr = torch.max(probs, 1)  # Greedy
                 #     logp = prob.log()
-                first_probs = F.softmax(probs + mask_first.log(), dim=1)
-                if self.training:
-                    m = torch.distributions.Categorical(first_probs)
-                    first_ptr = m.sample()
-                    # print(f"second_ptr:{second_ptr}")
-                    # print(mask_second.sum(dim=1)[0])
-                    while not torch.gather(mask_first, 1, first_ptr.data.unsqueeze(1)).byte().all():
-                        first_ptr = m.sample() # 检查下sample的有无被mask掉
-                else:
-                    prob, first_ptr = torch.max(first_probs, 1)  # Greedy
-                mask_first[torch.arange(first_ptr.size(0)), first_ptr] = 0
-                # Origin
+
+                # Originr
                 # if last_ptr is None:
                 #     first_ptr = torch.zeros([256]).to(device)
                 #     mask_second[torch.arange(first_ptr.size(0)), 0] = 0
@@ -265,7 +258,8 @@ class DRL4TSP(nn.Module):
                 else:
                     prob, second_ptr = torch.max(second_probs, 1)  # Greedy
                 mask_second[torch.arange(second_ptr.size(0)), second_ptr] = 0
-                second_logp = F.log_softmax(probs,dim=1)[torch.arange(second_ptr.size(0)), second_ptr]
+                second_logp = m.log_prob(second_ptr)
+                # second_logp = F.log_softmax(probs,dim=1)[torch.arange(second_ptr.size(0)), second_ptr]
                 chosen_points = torch.stack((first_ptr, second_ptr), dim=1)
                 # print(chosen_points)
                 indices = utils.apply_batch_permutation_pytorch(chosen_points, indices)
